@@ -6,7 +6,8 @@
 1. أنشئ مشروعًا جديدًا في Lovable.
 2. ارفع إلى المشروع من هذا المستودع: مجلد `media/img` (الصور) والخطوط من `src/fonts` (ثلاثة ملفات Thmanyah) وملف `public/logo-white.svg`.
 3. صور الشعار الأخرى (الملونة) تأتي من ملف الهوية عندك.
-4. البرومبتات مكتوبة بالإنجليزية لأن Lovable يولّد كودًا أدق بها. النصوص العربية التي يجب أن تظهر في الواجهة مكتوبة داخلها حرفيًا.
+4. **قاعدة البيانات فارغة عمدًا.** لا تنفّذ أي Migration قبل أن ترى SQL وتوافق عليه. كل موديول يضيف جداوله بنفسه.
+5. البرومبتات مكتوبة بالإنجليزية لأن Lovable يولّد كودًا أدق بها. النصوص العربية التي يجب أن تظهر في الواجهة مكتوبة داخلها حرفيًا.
 
 ---
 
@@ -46,20 +47,37 @@ QUALITY RULES (apply to everything from now on):
 - Placeholder content is clearly Arabic sample text, never lorem ipsum.
 
 Create: the design tokens, Tailwind config, font setup, a theme provider with toggle, the media() helper, a LogoMark SVG component (I will paste the SVG later), and an empty App with routes for: / , /about, /store, /courses, /governance, /news, /contact (each a placeholder page titled in Arabic). Add a short README section describing the tokens.
+
+DATABASE RULES (apply to every future database change):
+- The Supabase database is EMPTY on purpose. We build it module by module. NEVER create tables that the current step does not need.
+- Every schema change is a migration file in supabase/migrations named NNNN_module_name.sql. Show me the SQL and wait for my approval BEFORE applying it. Never edit an applied migration; add a new one.
+- Every table: Row Level Security enabled in the same migration, explicit policies (no table without policies), primary key uuid default gen_random_uuid(), created_at timestamptz default now(), indexes on every foreign key, check constraints for enums and ranges.
+- Roles live in a SEPARATE table (user_roles), never on the profile row, and are checked through a SECURITY DEFINER function has_role(user_id, role) with set search_path = ''. Revoke execute on trigger functions from anon and authenticated.
+- After every migration: run the Supabase security advisor, list any warnings, and fix them before moving on. Then regenerate the TypeScript types.
+- Never use the service-role key in frontend code. Writes that must be trusted (orders, payments, certificates, uploads) go through Edge Functions only.
+- Sample data goes in supabase/seed/*.sql, also shown to me first, and is clearly marked as sample.
 ```
 
 ### البرومبت 0.2: ربط Supabase (قاعدة البيانات موجودة مسبقًا)
 
 ```
-Connect this project to my EXISTING Supabase project (project ref: ppbipxcpxuzqmpblxzvv, URL https://ppbipxcpxuzqmpblxzvv.supabase.co) using the Supabase integration. Do NOT create a new database and do NOT enable Lovable Cloud.
+Connect this project to the NEW, EMPTY Supabase project I just created, using the Supabase integration with my own account. Do NOT enable Lovable Cloud and do NOT create another project.
 
-The schema already exists with Row Level Security enabled. Tables: profiles, initiatives, initiative_units, courses, course_modules, lessons, enrollments, lesson_progress, news, documents, people, orders, order_items, submissions. Roles enum app_role: admin, editor, finance, instructor, member.
+This step creates ONLY the identity and security foundation. Nothing else yet. Write it as migration 0001_foundation.sql, show it to me, wait for approval, then apply it:
 
-Tasks:
-1. Generate TypeScript types from the live schema and create src/integrations/supabase/client.ts using the publishable (anon) key from env vars VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.
-2. Create typed data-access hooks with TanStack Query for: published initiatives (with units), published courses (with modules and lessons), published news, documents by section, people by group.
-3. IMPORTANT SECURITY RULES: never use the service-role key in frontend code. Never change or drop existing RLS policies. If you need a schema change, write it as a new migration file in supabase/migrations and show it to me before applying. All writes to orders/order_items will later happen only from server-side Edge Functions.
-4. Do not add seed data yet.
+1. enum app_role: admin, editor, finance, instructor, member.
+2. profiles: id uuid primary key references auth.users(id) on delete cascade, full_name text, phone text with check (phone is null or phone ~ '^05[0-9]{8}$'), avatar_path text, created_at timestamptz default now().
+3. user_roles: id uuid pk, user_id uuid references auth.users(id) on delete cascade, role app_role not null, unique (user_id, role). Roles are NOT stored on profiles.
+4. function has_role(_user_id uuid, _role app_role) returns boolean, language sql, stable, SECURITY DEFINER, set search_path = '' ; and a helper is_staff() returning true for admin or editor.
+5. trigger function handle_new_user (SECURITY DEFINER, set search_path = '') that inserts a profiles row and a default 'member' role when an auth user is created. Revoke execute on it from public, anon and authenticated.
+6. audit_log: id, actor_id, action text, table_name text, record_id uuid, changes jsonb, created_at. Insert-only (no update/delete policy). Only admin can select.
+7. RLS: enabled on all four tables. profiles: a user reads and updates only their own row (cannot change id); admin reads all. user_roles: a user can read only their own roles; ONLY admin can insert/update/delete roles (use has_role in policies). Nobody can grant themselves a role.
+8. Make the very first registered user an admin only through a one-time manual SQL statement that I will run myself. Do not automate it.
+
+Then:
+- Generate TypeScript types and create src/integrations/supabase/client.ts using VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (publishable key only).
+- Write tests (SQL or Vitest) proving: a normal user cannot insert into user_roles, cannot read another profile, and anon cannot read profiles.
+- Run the security advisor and report. Do not build any pages or other tables in this step.
 ```
 
 ---
@@ -126,7 +144,7 @@ Use Framer Motion fade-up with stagger. No content may stay invisible if JS fail
 ### البرومبت 1.4: أقسام صفحة الهبوط (الجزء الثاني)
 
 ```
-Continue the home page with these sections. All data comes from Supabase through the hooks from step 0.2, with graceful fallback to local sample data (a constants file) when the tables are empty, and skeleton loaders.
+Continue the home page with these sections. IMPORTANT: the database has no content tables yet. Read ALL data from typed local constants in src/data/ (initiatives.ts, courses.ts, events.ts, news.ts, kpis.ts) whose shapes mirror the future tables (id, slug, title, summary, category, cover_path, goal_amount, raised_amount, units[], price, level, delivery, published_at ...). Access them ONLY through small hook functions (useInitiatives, useCourses, useNews ...) so that later module prompts can swap the constants for real Supabase queries without touching the components. Include skeleton loaders.
 
 D) STORE CAROUSEL ("متجر المبادرات", subtitle "ساهم في مبادرات الجمعية بمبلغ أو بوحدة عطاء"): category chips (الكل، التعليم، الأسرة، التراث، الرعاية) filtering a horizontal scroll-snap carousel (3 cards desktop, 2 tablet, 1.15 mobile) with prev/next arrow buttons and a "طالع المزيد" button → /store. Initiative card: 16/10 photo with a dark rounded category chip, title, 2-line description, a gold progress bar with raised amount, percent and goal ("98,500 ر.س · 66% من 150,000"), unit chips (selectable: e.g. "رقمنة 100 كتاب · 500", "فهرسة 500 عنوان · 250"), and two buttons: "التفاصيل" and gold "أضف للسلة" (adds the selected unit to the cart and shows a toast). Progress bars animate on first appearance.
 
@@ -178,6 +196,13 @@ Build the institutional pages with a shared PageHeader (navy gradient banner wit
 /awards: grid of award cards with gold medal icons.
 
 Use skeletons, empty states and error states. All photos via media().
+
+DATABASE (this module only). Migration 0002_people_and_pages.sql, show it to me first:
+- people: id, group_key text check in ('board','honorary','assembly','committees','executives','experts'), full_name, role_title, bio, photo_path, term_label, sort int default 0, published boolean default false.
+- site_pages: id, slug unique, title, body jsonb (sections for about/strategy/history/vision), updated_at, updated_by, published boolean.
+- RLS: public can select rows where published = true; admin and editor (is_staff()) can do everything; every write inserts a row into audit_log through a trigger.
+- Index on (group_key, sort). Seed a few clearly marked sample people (8 board, 4 honorary, 6 executives) and the about/strategy sections. Show the seed first.
+Then replace the constants behind the people and about pages with real queries. Run the security advisor.
 ```
 
 ### البرومبت 2.2: الحوكمة والتقارير والدراسات
@@ -192,6 +217,13 @@ Build /governance, /reports and /studies as tabbed document libraries synced to 
 Document card: a navy cover tile with the faint logo pattern and the title, hijri year, views count, and a full-width "عرض وتحميل" button. Clicking opens a secure download: call a Supabase Edge Function that returns a short-lived signed URL for the R2 object (file_path) and increments views. For now, make the function call a stub and show a toast.
 
 Add search with debounce, pagination (12 per page), and empty states. Sample data: 6 documents per tab in a seed SQL file (supabase/seed/documents.sql), titles in Arabic (e.g. "لائحة تعارض المصالح"، "التقرير السنوي 1446هـ"). Show me the seed SQL before running it.
+
+DATABASE (this module only). Migration 0003_documents.sql, show it first:
+- documents: id, section text check in ('governance','reports','studies','publications','press','awareness'), tab text, title, summary, file_path (R2 object key, never a public URL), year_hijri int, size_bytes bigint, mime_type, views int default 0, published boolean default false, search tsvector generated from title and summary, created_at.
+- RLS: public select where published; is_staff() full access. Direct updates to views are NOT allowed from the browser: provide a SECURITY DEFINER function increment_document_views(doc_id) callable by anon.
+- Indexes: (section, tab), GIN on search.
+- A private R2 bucket path convention: documents/{section}/{id}.pdf. Downloads are served only through the signed-URL Edge Function.
+Seed 6 sample rows per tab, clearly marked. Wire the pages to this table. Run the security advisor.
 ```
 
 ### البرومبت 2.3: الأخبار والإعلام والمحتوى التوعوي
@@ -203,6 +235,13 @@ Build the media modules.
 /gallery: masonry photo album with a keyboard-accessible lightbox (Esc closes, arrows navigate).
 /videos: tabs (الفيديوهات التوعوية، مكتبة الفيديو), video cards with a play overlay. Video playback uses the Cloudflare Stream embed (iframe from customer-<code>.cloudflarestream.com, code from env VITE_STREAM_SUBDOMAIN) inside a modal; until configured show a friendly message.
 /awareness: tabs (المنتجات التوعوية، بودكاست بيت الأسرة). Products: downloadable infographics/booklets cards. Podcast: a persistent audio player component (play/pause, scrubber, speed 1x/1.25x/1.5x, episode list), audio files from the media CDN.
+
+DATABASE (this module only). Migration 0004_media.sql, show it first:
+- news: id, slug unique, title, summary, body (sanitized HTML), category, cover_path, published_at, views int default 0, published boolean default false, search tsvector.
+- media_items: id, kind text check in ('photo','video','podcast','product'), title, category, file_path, stream_uid (Cloudflare Stream id, nullable), duration_seconds, album text, published boolean, sort int, created_at.
+- RLS: public select where published; is_staff() full access; triggers write to audit_log.
+- Indexes: news(published_at desc), media_items(kind, album).
+Seed 9 sample news items and 15 sample media items (titles in Arabic, marked sample). Replace the home-page news constants with a real query. Run the security advisor.
 ```
 
 ---
@@ -217,21 +256,38 @@ Build the initiatives and store.
 /programs/:slug (initiative detail): a hero banner with the photo on the side, a big progress bar (raised vs goal, percent, supporters count, days left), the story section, a "أين يذهب تبرعك" stacked bar with a legend, an updates timeline, a photo gallery, and a sticky donation box: frequency segmented control (مرة واحدة / شهريًا), amount chips (50, 100, 250, 500, 1000, 2500), a custom amount input (minimum 10, numeric), the initiative's giving units as selectable cards, and a gold "أضف المساهمة إلى السلة" button. Note under it: "المساهمة في هذا النموذج تجريبية ولا يُحصَّل أي مبلغ."
 /store: a quick-donation panel to the general fund, a filter sidebar (search, category) with a result count, a 2-column grid of initiative cards, and a "الأوقاف والصدقات الجارية" section with three waqf share cards (سهم في وقف المكتبة 500، سهم في وقف طالب علم 1000، سهم في وقف المركز 2000).
 Validate all amounts with zod (number, min 10, max 1,000,000, 2 decimals max). The cart store keeps item key, title, unit label, unit price, quantity and recurring flag. NEVER trust client prices: the server recomputes totals in step 3.2.
+
+DATABASE (this module only). Migration 0005_initiatives.sql, show it first:
+- initiatives: id, slug unique, title, summary, body, category, kind text check in ('development','community','education'), cover_path, goal_amount numeric(12,2) check (>= 0), raised_amount numeric(12,2) default 0 check (>= 0), supporters_count int default 0, ends_at date, published boolean default false, created_at.
+- initiative_units: id, initiative_id fk on delete cascade, label, price numeric(10,2) check (> 0), sort int. Indexed on initiative_id.
+- initiative_updates: id, initiative_id fk, title, body, published_at.
+- funds: id, slug unique, title, kind text check in ('general','waqf'), unit_label, unit_price, published boolean.
+- RLS: public select where published (units and updates follow their parent's published flag via exists()); is_staff() full access. raised_amount and supporters_count are NEVER writable from the browser, not even by staff: they change only through the payment Edge Function in the next prompt.
+Seed 9 sample initiatives with 2 units each and 3 waqf funds, marked sample. Wire the home page store carousel, /store and /programs to the tables. Run the security advisor.
 ```
 
 ### البرومبت 3.2: السلة والدفع الآمن
 
 ```
-Build /checkout and the secure order flow. 
-UI: a 3-step indicator (السلة، البيانات، الدفع), order summary with totals, a form for full name, mobile (05XXXXXXXX) and email (for the receipt), payment method choice (مدى، بطاقة ائتمانية، Apple Pay), and an order-confirmed screen.
+Build /checkout and the secure order flow.
+
+UI: a 3-step indicator (السلة، البيانات، الدفع), order summary with totals, a form for full name, mobile (05XXXXXXXX) and email (for the receipt), payment method choice (مدى، بطاقة ائتمانية، Apple Pay), and an order-confirmed screen. Add links to the privacy and refund policies.
+
+DATABASE (this module only). Migration 0006_orders.sql, show it first:
+- orders: id, user_id (nullable for guests), email, full_name, phone, subtotal numeric(12,2), total numeric(12,2) check (>= 0), currency text default 'SAR', status text check in ('pending','paid','failed','refunded') default 'pending', gateway text, gateway_ref text unique, receipt_no text unique, created_at, paid_at.
+- order_items: id, order_id fk on delete cascade, kind text check in ('donation','course','waqf'), initiative_id, unit_id, course_id (nullable foreign keys), label, qty int check (> 0), unit_price numeric(10,2) check (> 0), recurring boolean default false.
+- payment_events: id, gateway, event_id text unique (idempotency), payload jsonb, processed_at.
+- RLS: a user can SELECT only their own orders/items (user_id = auth.uid()); finance and admin can select all; NOBODY can insert, update or delete from the browser (no insert/update/delete policies at all). All writes happen in Edge Functions with the service role.
+- receipt numbers generated by a database sequence function (format SAL-R-YYYY-NNNNNN).
+
 SECURITY ARCHITECTURE (strict):
-1. The browser sends only item identifiers and quantities (initiative_id + unit_id or course_id), never prices.
-2. Create a Supabase Edge Function create-order that: validates input with zod, loads the real prices from the database using the service role INSIDE the function, computes the total, inserts orders and order_items with status 'pending', and returns an order id. Rate limit per IP. CORS locked to the site origin.
-3. Create a payment-webhook Edge Function that verifies the gateway signature (HMAC) before changing any state, is idempotent (same event twice does nothing), sets status to 'paid', updates initiatives.raised_amount transactionally, and creates enrollments for course items. Gateway: build behind an interface so Moyasar or HyperPay can be plugged in; use a mock provider for now.
-4. RLS: browsers can never insert into orders or order_items directly. Confirm and show the policies.
-5. No card data ever touches our servers: use the gateway's hosted/tokenized fields only.
-6. Log every state change in an audit table (new migration, show it to me first).
-7. Add the legal notes in the UI: a link to the privacy policy and refund policy, and a note that donations are processed through approved channels.
+1. The browser sends only identifiers and quantities (initiative_id + unit_id, fund_id, or course_id), NEVER prices or totals.
+2. Edge Function create-order: validates with zod, loads the real prices from the database, computes the total, inserts the order and items as 'pending', returns the order id and a gateway session. Rate limit per IP. CORS locked to the site origin.
+3. Edge Function payment-webhook: verifies the gateway HMAC signature BEFORE any change, is idempotent (payment_events.event_id unique), sets status 'paid', increments initiatives.raised_amount and supporters_count in a single transaction, and creates enrollments for course items. Gateway behind an interface; use a mock provider for now (Moyasar or HyperPay will be plugged in later).
+4. No card data ever touches our servers: hosted/tokenized gateway fields only.
+5. Every state change writes to audit_log.
+6. Add tests: a tampered price in the request is ignored; the same webhook delivered twice changes nothing; a user cannot read another user's order.
+Run the security advisor and report.
 ```
 
 ---
@@ -245,6 +301,14 @@ Build the learning platform public side.
 /courses: summary strip (courses count, learners, average rating, learning paths), a filter sidebar (search, price: الكل/مجانية/مدفوعة, delivery: مسجّلة/مباشرة, level: مبتدئ/متوسط/متقدم, category) with URL-synced query params, a 2-column card grid, then a "مسارات التعلّم" section (3 path cards) and "مدرّبو المنصة".
 /courses/:slug: a hero with title, tags, rating, hours, lessons and learners; a "ماذا ستتعلّم" checklist; an accordion of modules and lessons (lesson rows show play/doc/lock icons and minutes; free-preview lessons are playable); instructor card; a certificate preview card (a white certificate with the logo mark, "تشهد الجمعية الأهلية الصالحية بعنيزة أن [الاسم] أتمّ دورة ..." and a verification number like SAL-2026-00412); a sticky purchase card (price, strike price, "سجّل في الدورة" gold button, "شاهد الدرس التجريبي", included features list, and a note that tax and invoicing will be set when payment is connected). Free courses show "سجّل مجانًا".
 Data from courses, course_modules, lessons. Prices and access are enforced by the server, never by the UI.
+
+DATABASE (this module only). Migration 0007_courses.sql, show it first:
+- courses: id, slug unique, title, summary, body, category, level text check in ('beginner','intermediate','advanced'), delivery text check in ('recorded','live','both'), price numeric(10,2) default 0 check (>= 0), compare_price numeric(10,2), instructor_id uuid references profiles(id), cover_path, hours numeric, rating_avg numeric(2,1), learners_count int default 0, published boolean default false, search tsvector, created_at.
+- course_modules: id, course_id fk on delete cascade, title, sort.
+- lessons: id, module_id fk on delete cascade, title, kind text check in ('video','document','quiz','live'), stream_uid text, document_path text, duration_min int, free_preview boolean default false, sort. IMPORTANT: stream_uid and document_path must NOT be readable by the public.
+- learning_paths and learning_path_courses (id, title, summary; path_id, course_id, sort).
+- RLS: public select on published courses and their modules; for lessons expose only a VIEW lessons_public (id, module_id, title, kind, duration_min, free_preview, sort) with no media identifiers; direct select on the lessons table only for enrolled users (through is_enrolled(course_id)), the course instructor and staff. Instructors manage only their own courses.
+Seed 9 sample courses with modules and lessons, marked sample. Wire the home carousel, /courses and /courses/:slug. Run the security advisor.
 ```
 
 ### البرومبت 4.2: مشغّل الدروس ولوحة المتدرّب
@@ -256,6 +320,16 @@ Build the learner experience (auth required, role member).
 Quizzes: multiple-choice with instant scoring and attempts; pass mark 80% from settings.
 Certificates: when progress is 100% and the final quiz is passed, an Edge Function issues certificate_no (format SAL-YYYY-NNNNN, unique) and generates a PDF; add a public verification page /verify/:certificateNo that shows only the learner's name, course and date.
 Security: enforce enrollment through RLS and Edge Functions; a learner can only read their own enrollments and progress.
+
+DATABASE (this module only). Migration 0008_learning.sql, show it first:
+- enrollments: id, user_id, course_id, status text check in ('active','completed'), progress int check (between 0 and 100), source_order_id, completed_at, certificate_no text unique, created_at, unique (user_id, course_id). Created ONLY by the payment Edge Function (or by a free-course enrollment function), never by direct browser insert.
+- lesson_progress: user_id, lesson_id, completed_at, last_position_seconds; primary key (user_id, lesson_id).
+- lesson_notes: id, user_id, lesson_id, body, updated_at.
+- quizzes, quiz_questions (options jsonb, correct answers NOT readable by the browser: keep them in a table with no select policy and grade only inside an Edge Function), quiz_attempts (user_id, quiz_id, score, passed, created_at).
+- certificates: id, certificate_no unique, user_id, course_id, issued_at, revoked boolean default false. Public verification only through a SECURITY DEFINER function verify_certificate(no) returning learner name, course title and date.
+- function is_enrolled(course_id) SECURITY DEFINER, set search_path = ''.
+- RLS: learners read and write only their own progress, notes and attempts; instructors read aggregates for their courses; staff read all.
+Add tests proving a learner cannot read another learner's progress or see quiz answers. Run the security advisor.
 ```
 
 ---
@@ -267,8 +341,10 @@ Security: enforce enrollment through RLS and Edge Functions; a learner can only 
 ```
 Build authentication and authorization on Supabase Auth.
 Pages: /login (tabs: تسجيل الدخول / حساب جديد), password reset, email verification, and /account (profile, my courses, my orders and receipts, my donations, logout). Add Saudi phone validation. Prepare a hook point for Nafath (النفاذ الوطني) login later.
-Roles from profiles.role: admin, editor, finance, instructor, member. Create a ProtectedRoute component and a useRole hook for UI only; REAL enforcement is RLS and Edge Functions. Users must never be able to change their own role (the existing policy blocks it; add a test that proves it).
+Roles come from the user_roles table (admin, editor, finance, instructor, member), checked with has_role(). Create a ProtectedRoute component and a useRole hook for UI only; REAL enforcement is RLS and Edge Functions. Users must never be able to change their own role (only admin can write user_roles; add a test that proves it).
 Hardening: strong password rules, rate limiting on auth, secure cookie/session handling, session timeout, no user enumeration in error messages (generic Arabic messages), and a privacy consent checkbox with a link to the policy. Write a short SECURITY.md describing the model.
+
+DATABASE (this module only). Migration 0009_account_security.sql, show it first. The foundation (profiles, user_roles, has_role) already exists. Add only what is missing: consent_records (user_id, policy_key, version, accepted_at, ip_hash), data_requests (user_id, kind check in ('export','delete'), status, created_at) with RLS so a user can insert and read only their own rows and only admin can update status. Also add a function admin_set_role(target uuid, new_role app_role) callable only by admins, which writes to audit_log. Verify with tests that role escalation is impossible. Run the security advisor.
 ```
 
 ### البرومبت 5.2: الخدمات والنماذج
@@ -279,6 +355,14 @@ Build the forms and services.
 /volunteer: tabs (التطوع، الوظائف، الشراكات والرعاية) with forms and a jobs list.
 /contact: tabs (تواصل معنا، فروعنا، تقديم شكوى، الأسئلة الشائعة) with a contact form, branch cards, a complaint form that returns a tracking number, and an FAQ accordion.
 All forms insert into the Supabase table submissions through an Edge Function that: validates with zod, strips HTML, rate-limits per IP, verifies a Cloudflare Turnstile token (env var for the site key), and never exposes other users' data. Show a success state, never reveal internal errors. Add a honeypot field. Only admin/editor can read submissions (existing RLS).
+
+DATABASE (this module only). Migration 0010_submissions.sql, show it first:
+- submissions: id, kind text check in ('contact','complaint','volunteer','partner','service','membership'), full_name, phone, email, subject, message, details jsonb, status text check in ('new','in_progress','closed') default 'new', tracking_no text unique (generated, format SAL-1042 style, shown to the sender), assigned_to, created_at.
+- jobs: id, title, location, type, description, published, closes_at.
+- branches: id, name, description, address, phone, lat, lng, sort, published.
+- faqs: id, question, answer, sort, published.
+- RLS: NO public insert policy on submissions (inserts go only through the Edge Function using the service role after Turnstile and rate-limit checks); only is_staff() can select and update; public select on published jobs, branches and faqs.
+Seed sample branches (3), faqs (6) and jobs (3), marked sample. Run the security advisor.
 ```
 
 ### البرومبت 5.3: البحث والتحسينات
@@ -286,6 +370,8 @@ All forms insert into the Supabase table submissions through an Edge Function th
 ```
 Build /search: a single search box that queries news, courses, initiatives, documents and pages through a Postgres full-text search (create a migration with tsvector columns using the 'simple' configuration and Arabic-friendly normalization: strip tashkeel, normalize alef and ya/ta marbuta; show me the migration first). Results grouped by type with highlighted matches.
 Also add: a sitemap.xml and robots.txt, canonical tags, per-page meta, structured data (Organization, Course, Article, Event), and image lazy-loading audit.
+
+DATABASE: do not add new content tables. Add migration 0011_search.sql showing a SECURITY INVOKER function search_site(q text) that unions published rows from news, courses, initiatives and documents using their tsvector columns (so RLS still applies). Show it first, then run the security advisor.
 ```
 
 ---
@@ -300,6 +386,8 @@ Create ONE module at a time, each with: a data table (search, filters, sorting, 
 Start with: الأخبار، المبادرات (with units and goals)، الدورات (with modules, lessons, Cloudflare Stream upload)، الوثائق، الأشخاص. Then: الطلبات والتبرعات (finance, with export to CSV and a receipts view), المتعلمون، النماذج الواردة، المستخدمون والأدوار (admin only).
 Add a dashboard home with KPIs and charts (donations by month, enrollments, top courses) using Recharts, with accessible colors in both themes.
 Do the first two modules now (الأخبار والمبادرات) and stop so I can review.
+
+DATABASE for the admin area: add only what each admin module needs, as separate migrations shown to me first, for example content_revisions (table_name, record_id, snapshot jsonb, edited_by, created_at) for undo history, and upload_registry (id, owner_id, bucket_key, mime_type, size_bytes, status) used by the presigned-upload Edge Function. Do not weaken any existing RLS policy. Every admin write must be authorized twice: by RLS and by a role check inside the Edge Function.
 ```
 
 ---
@@ -323,7 +411,7 @@ Give me a checklist of what is done and what remains.
 
 - **الصور والخطوط:** ارفعها قبل البرومبت 0.1. الصور في `media/img`، والخطوط في `src/fonts`.
 - **لا تعطِ Lovable أي مفتاح سري.** المفتاح العام (anon) وحده يوضع في إعدادات البيئة. مفاتيح الدفع و`service_role` تُضاف كأسرار في Supabase Edge Functions فقط.
-- **قاعدة البيانات جاهزة** في مشروع Supabase المسمى `website`. البرومبت 0.2 يوجّه Lovable لاستخدامها بدل إنشاء قاعدة جديدة.
+- **قاعدة البيانات تُبنى تدريجيًا:** 0.2 يبني الأساس فقط (المستخدمون والأدوار والتدقيق)، وكل موديول يضيف جداوله مع سياساته. الصفحة الرئيسية تعمل أولًا ببيانات محلية، ثم تُربط بالجداول حين يُبنى موديولها.
 - **راجع كل Migration** قبل تطبيقها. البرومبتات تطلب منه عرضها عليك أولًا.
 - **الدفع والتبرعات:** لا تفعّل التحصيل الحقيقي قبل التحقق من الجهات المنظمة ومن ضريبة القيمة المضافة والفوترة.
 - **كل نص تجريبي** مُعلَّم في الواجهة ومحفوظ في ملف ثوابت ليسهل استبداله ببيانات الجمعية.
